@@ -3,6 +3,7 @@ package io.github.cryolitia.stickerbot
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
+import android.util.Log
 import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.Menu
@@ -35,6 +36,7 @@ import com.google.android.material.textfield.TextInputLayout
 import io.github.cryolitia.stickerbot.databinding.DialogDownloadBinding
 import io.github.cryolitia.stickerbot.databinding.FragmentMainBinding
 import kotlinx.coroutines.launch
+import org.slf4j.event.LoggingEvent
 import java.io.File
 
 private data class AdapterItem (
@@ -78,125 +80,89 @@ private class StickerSetAdapter(
 
 class FirstFragment : Fragment() {
 
+    private fun startDownload(url: String) {
+
+        // show bottom sheet
+
+        val bottomSheet = DownloadBottomSheetFragment()
+        bottomSheet.show(parentFragmentManager, DownloadBottomSheetFragment.TAG)
+
+
+        // start work
+
+        val request = OneTimeWorkRequest.Builder(DownloadStickersWork::class.java)
+            .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+            .addTag(url)
+            .setInputData(
+                Data.Builder().putString("STICKERS_URL", url).build()
+            )
+            .build()
+
+        val workManager = WorkManager.getInstance(requireContext())
+        workManager.enqueue(request)
+
+        lifecycleScope.launch {
+
+            workManager.getWorkInfoByIdFlow(request.id).collect { workInfo ->
+                if (workInfo == null) return@collect
+
+                val progress = workInfo.progress.getFloat("progress", 0f)
+                val subProgress = workInfo.progress.getString("sub_progress")
+                val latest = workInfo.progress.getString("latest")
+                val emoji = workInfo.progress.getString("emoji")
+
+                bottomSheet.updateProgress(progress, latest, emoji)
+
+                if (workInfo.state.isFinished) {
+                    bottomSheet.dismiss()
+
+                    if (workInfo.state == WorkInfo.State.SUCCEEDED) {
+                        with (requireContext()) { "Download finished".alert() }
+                    } else if (workInfo.state == WorkInfo.State.FAILED) {
+                        Log.e("FirstFragment", "Download failed: " + workInfo.stopReason)
+                        with (requireContext()) {
+                            if (workInfo.outputData.getString("error") != null) {
+                                "Download failed: \n\n" + workInfo.outputData.getString("error")!!.alert()
+                            } else {
+                                "Download failed".alert()
+                            }
+                        }
+                    }
+                }
+            }
+
+        }
+    }
+
     /**
-     * Download / update sticker set
+     * On download new sticker set
      */
     private fun onFabClicked() {
 
-        val ctx = this@FirstFragment.requireContext()
+        MaterialAlertDialogBuilder(requireContext()).run {
 
-        lifecycleScope.launch {
-            val token = ctx.getPreference(stringPreferencesKey(TELEGRAM_BOT_TOKEN))
-
-            if (token.isNullOrBlank()) {
-                with(ctx) { "Please set telegram bot token in settings firstly.".toast() }
-                return@launch
+            var textInputEditText: TextInputEditText
+            val textInputLayout: TextInputLayout = TextInputLayout(
+                requireContext(),
+                null,
+                com.google.android.material.R.attr.textInputOutlinedStyle
+            ).apply {
+                textInputEditText = TextInputEditText(requireContext())
+                addView(textInputEditText)
             }
 
-            MaterialAlertDialogBuilder(ctx).run {
-
-                var textInputEditText: TextInputEditText
-                val textInputLayout: TextInputLayout = TextInputLayout(
-                    ctx,
-                    null,
-                    com.google.android.material.R.attr.textInputOutlinedStyle
-                ).apply {
-                    prefixText = "https://t.me/addstickers/"
-                    textInputEditText = TextInputEditText(this.context)
-                    addView(textInputEditText)
+            setTitle("Input Stickers Link")
+            setView(textInputLayout)
+            setPositiveButton(
+                "OK"
+            ) { _, _ ->
+                if (textInputEditText.text.isNullOrBlank()) {
+                    return@setPositiveButton
                 }
-
-                setTitle("Input Stickers link")
-                setView(textInputLayout)
-                setPositiveButton(
-                    "OK"
-                ) { _, _ ->
-
-                    val stickersUrl = textInputEditText.text.toString()
-                    if (stickersUrl.isBlank()) {
-                        lifecycleScope.launch {
-                            with(ctx) {
-                                "Please input stickers link".toast()
-                            }
-                        }
-                        return@setPositiveButton
-                    }
-
-                    val dialogBinding = DialogDownloadBinding.inflate(layoutInflater)
-                    val progressDialog = MaterialAlertDialogBuilder(ctx)
-                        .setTitle("Downloading Stickers")
-                        .setView(dialogBinding.root)
-                        .setCancelable(false)
-                        .setNegativeButton("Cancel") { _, _ ->
-                            WorkManager.getInstance(ctx)
-                                .cancelAllWorkByTag(stickersUrl)
-                        }
-                        .create()
-                    progressDialog.show()
-
-                    val request = OneTimeWorkRequest.Builder(DownloadStickersWork::class.java)
-                        .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
-                        .addTag(stickersUrl)
-                        .setInputData(
-                            Data.Builder().putString("STICKERS_URL", stickersUrl).build()
-                        )
-                        .build()
-
-                    val workManager = WorkManager.getInstance(ctx)
-                    workManager.enqueue(request)
-
-                    lifecycleScope.launch {
-                        workManager.getWorkInfoByIdFlow(request.id).collect { workInfo ->
-                            if (workInfo != null) {
-                                val progress = workInfo.progress.getFloat("progress", 0f)
-                                val subProgress = workInfo.progress.getString("sub_progress")
-                                val latest = workInfo.progress.getString("latest")
-
-                                if (subProgress != null) {
-                                    dialogBinding.FrameLinearProgressIndicator.progress =
-                                        (progress * 100).toInt()
-                                    dialogBinding.FrameTextView.text =
-                                        "${(progress * 100).toInt()}%"
-                                    dialogBinding.FFmpegDetail.text =
-                                        "Processing: ${File(subProgress).name}"
-                                } else {
-                                    dialogBinding.linearProgressIndicator.progress =
-                                        (progress * 100).toInt()
-                                    dialogBinding.progressText.text =
-                                        "${(progress * 100).toInt()}%"
-                                }
-
-                                if (latest != null) {
-                                    dialogBinding.StickerDetail.text =
-                                        "Latest: ${File(latest).name}"
-                                    val bitmap = BitmapFactory.decodeFile(latest)
-                                    if (bitmap != null) {
-                                        dialogBinding.StickerImage.setImageBitmap(bitmap)
-                                    }
-                                }
-
-                                if (workInfo.state.isFinished) {
-                                    progressDialog.dismiss()
-                                    with(ctx) {
-                                        if (workInfo.state == WorkInfo.State.SUCCEEDED) {
-                                            "Download finished".toast()
-                                        } else if (workInfo.state == WorkInfo.State.FAILED) {
-                                            val error =
-                                                workInfo.outputData.getString("error")
-                                                    ?: "Unknown error"
-                                            error.alert()
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                setNegativeButton("Cancel") { dialog, _ -> dialog.dismiss() }
-                create()
-                show()
+                startDownload(textInputEditText.text.toString())
             }
 
+            show()
         }
     }
 
