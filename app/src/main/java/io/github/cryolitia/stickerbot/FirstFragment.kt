@@ -99,7 +99,7 @@ class FirstFragment : Fragment() {
         bottomSheet.setListeners(
             {
 
-                bottomSheet.updateProgress(0f, null, null)
+                bottomSheet.resetProgress()
 
                 // start work
 

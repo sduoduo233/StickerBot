@@ -221,14 +221,6 @@ class DownloadStickersWork(appContext: Context, workerParams: WorkerParameters) 
                                                 (height * scaleFactor).toInt()
                                             )
                                         )
-
-                                        setProgressAsync(
-                                            Data.Builder()
-                                                .putFloat("progress", idx.toFloat() / frames.toFloat())
-                                                .putString("sub_progress", stickerFile.absolutePath)
-                                                .build()
-                                        )
-
                                     }
 
                                     encoder.process()

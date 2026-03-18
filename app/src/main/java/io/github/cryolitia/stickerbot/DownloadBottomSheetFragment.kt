@@ -37,6 +37,13 @@ class DownloadBottomSheetFragment() : BottomSheetDialogFragment() {
         return binding.root
     }
 
+    fun resetProgress() {
+        binding.progressBar.progress = 0
+        binding.progressBar.isIndeterminate = true
+        binding.preview.setImageBitmap(null)
+        binding.downloadingSmall.text = ""
+    }
+
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         onViewCreated()
         super.onViewCreated(view, savedInstanceState)
@@ -50,8 +57,6 @@ class DownloadBottomSheetFragment() : BottomSheetDialogFragment() {
         if (latest != null && File(latest).isFile) {
             val bitmap = BitmapFactory.decodeFile(latest)
             binding.preview.setImageBitmap(bitmap)
-        } else {
-            binding.preview.setImageBitmap(null)
         }
 
         binding.downloadingSmall.text = emoji ?: ""
