@@ -60,7 +60,7 @@ class DownloadStickersWork(appContext: Context, workerParams: WorkerParameters) 
                 )
             }
 
-            val match = Regex("^https://t.me/(addemoji|addstickers)/(.+)$").find(stickersUrl)
+            val match = Regex("^https://t\\.me/(addemoji|addstickers)/(.+)$").find(stickersUrl)
             if (match != null) {
                 stickersUrl = match.groupValues[2]
             } else {

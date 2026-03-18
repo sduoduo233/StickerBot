@@ -30,12 +30,15 @@ import androidx.work.WorkManager
 import com.google.android.flexbox.FlexDirection
 import com.google.android.flexbox.FlexboxLayoutManager
 import com.google.android.flexbox.JustifyContent
+import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
 import io.github.cryolitia.stickerbot.databinding.DialogDownloadBinding
 import io.github.cryolitia.stickerbot.databinding.FragmentMainBinding
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.slf4j.event.LoggingEvent
 import java.io.File
 
@@ -48,16 +51,18 @@ private data class AdapterItem (
 )
 
 private class StickerSetAdapter(
-    private val dataSet: Array<AdapterItem>,
     private val onClick: (AdapterItem) -> Unit = {},
 ) :
     RecyclerView.Adapter<StickerSetAdapter.ViewHolder>() {
+
 
     class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         val imageView: ImageView = view.findViewById(R.id.image)
         val displayName: TextView = view.findViewById(R.id.display_name)
         val id: TextView = view.findViewById(R.id.sticker_id)
     }
+
+    val dataSet = ArrayList<AdapterItem>()
 
     override fun onCreateViewHolder(viewGroup: ViewGroup, viewType: Int): ViewHolder {
         val view = LayoutInflater.from(viewGroup.context).inflate(R.layout.item_stickerset, viewGroup, false)
@@ -80,6 +85,8 @@ private class StickerSetAdapter(
 
 class FirstFragment : Fragment() {
 
+    private var adapter: StickerSetAdapter? = null
+
     private fun startDownload(url: String) {
 
         // show bottom sheet
@@ -87,51 +94,73 @@ class FirstFragment : Fragment() {
         val bottomSheet = DownloadBottomSheetFragment()
         bottomSheet.show(parentFragmentManager, DownloadBottomSheetFragment.TAG)
 
+        var request: OneTimeWorkRequest? = null
 
-        // start work
+        bottomSheet.setListeners(
+            {
 
-        val request = OneTimeWorkRequest.Builder(DownloadStickersWork::class.java)
-            .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
-            .addTag(url)
-            .setInputData(
-                Data.Builder().putString("STICKERS_URL", url).build()
-            )
-            .build()
+                bottomSheet.updateProgress(0f, null, null)
 
-        val workManager = WorkManager.getInstance(requireContext())
-        workManager.enqueue(request)
+                // start work
 
-        lifecycleScope.launch {
+                request = OneTimeWorkRequest.Builder(DownloadStickersWork::class.java)
+                    .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                    .addTag(url)
+                    .setInputData(
+                        Data.Builder().putString("STICKERS_URL", url).build()
+                    )
+                    .build()
 
-            workManager.getWorkInfoByIdFlow(request.id).collect { workInfo ->
-                if (workInfo == null) return@collect
+                val workManager = WorkManager.getInstance(requireContext())
+                workManager.enqueue(request)
 
-                val progress = workInfo.progress.getFloat("progress", 0f)
-                val subProgress = workInfo.progress.getString("sub_progress")
-                val latest = workInfo.progress.getString("latest")
-                val emoji = workInfo.progress.getString("emoji")
+                lifecycleScope.launch {
 
-                bottomSheet.updateProgress(progress, latest, emoji)
+                    // listen for progress
 
-                if (workInfo.state.isFinished) {
-                    bottomSheet.dismiss()
+                    workManager.getWorkInfoByIdFlow(request.id).collect { workInfo ->
+                        if (workInfo == null) return@collect
 
-                    if (workInfo.state == WorkInfo.State.SUCCEEDED) {
-                        with (requireContext()) { "Download finished".alert() }
-                    } else if (workInfo.state == WorkInfo.State.FAILED) {
-                        Log.e("FirstFragment", "Download failed: " + workInfo.stopReason)
-                        with (requireContext()) {
-                            if (workInfo.outputData.getString("error") != null) {
-                                "Download failed: \n\n" + workInfo.outputData.getString("error")!!.alert()
-                            } else {
-                                "Download failed".alert()
+                        val progress = workInfo.progress.getFloat("progress", 0f)
+                        val latest = workInfo.progress.getString("latest")
+                        val emoji = workInfo.progress.getString("emoji")
+
+                        bottomSheet.updateProgress(progress, latest, emoji)
+
+                        if (workInfo.state.isFinished) {
+                            bottomSheet.dismiss()
+
+                            if (workInfo.state == WorkInfo.State.SUCCEEDED) {
+                                with (requireContext()) { "Download finished".alert() }
+                            } else if (workInfo.state == WorkInfo.State.FAILED) {
+                                Log.e("FirstFragment", "Download failed: " + workInfo.stopReason)
+                                with (requireContext()) {
+                                    if (workInfo.outputData.getString("error") != null) {
+                                        "Download failed: \n\n" + workInfo.outputData.getString("error")!!.alert()
+                                    } else {
+                                        "Download failed".alert()
+                                    }
+                                }
+                            } else if (workInfo.state == WorkInfo.State.CANCELLED) {
+                                with(requireContext()) { "Download cancelled".toast() }
+                            }
+
+                            withContext(Dispatchers.Main) {
+                                refresh()
                             }
                         }
                     }
+
+                }
+            },
+            {
+                // cancel work
+
+                if (request != null) {
+                    WorkManager.getInstance(requireContext()).cancelWorkById(request.id)
                 }
             }
-
-        }
+        )
     }
 
     /**
@@ -166,14 +195,8 @@ class FirstFragment : Fragment() {
         }
     }
 
-    override fun onCreateView(
-        inflater: LayoutInflater, container: ViewGroup?,
-        savedInstanceState: Bundle?
-    ): View {
-
-        val binding = FragmentMainBinding.inflate(inflater)
-
-        // recycler view
+    private fun refresh() {
+        if (adapter == null) return
 
         val stickerSetArray = iterateStickerSet(requireContext())
         val adapterItems = ArrayList<AdapterItem>(stickerSetArray.size)
@@ -197,7 +220,22 @@ class FirstFragment : Fragment() {
             ))
         }
 
-        binding.recyclerView.adapter = StickerSetAdapter(adapterItems.toTypedArray(), { item ->
+        adapter!!.dataSet.clear()
+        adapter!!.dataSet.addAll(adapterItems)
+        adapter!!.notifyDataSetChanged()
+    }
+
+    override fun onCreateView(
+        inflater: LayoutInflater, container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
+
+        val binding = FragmentMainBinding.inflate(inflater)
+
+        // recycler view
+
+
+        adapter = StickerSetAdapter { item ->
             // on item click
 
             lifecycleScope.launch {
@@ -231,7 +269,7 @@ class FirstFragment : Fragment() {
                                 if (item.metadataFile.exists()) {
                                     item.metadataFile.delete()
                                 }
-                                requireActivity().recreate()
+                                refresh()
                             }
                             .setNeutralButton("Cancel") { dialog, _ ->
                                 dialog.dismiss()
@@ -243,7 +281,7 @@ class FirstFragment : Fragment() {
                     .setNeutralButton("Update") { dialog, _ ->
 
                         dialog.dismiss()
-                        // (activity as MainActivity).downloadStickers(requireContext(), directory.name)
+                        startDownload("https://t.me/addstickers/" + item.directory.name)
 
                     }
                     .setPositiveButton("Close") { dialog, _ ->
@@ -267,9 +305,12 @@ class FirstFragment : Fragment() {
 
             }
 
-        })
+        }
 
+        binding.recyclerView.adapter = adapter
         binding.recyclerView.layoutManager = LinearLayoutManager(requireContext())
+
+        refresh()
 
         // fab
 
