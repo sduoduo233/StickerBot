@@ -142,11 +142,13 @@ class DownloadStickersWork(appContext: Context, workerParams: WorkerParameters) 
                 val (data, _, filePath) = client.getTelegramFile(token, stickerSetResult.thumb.file_id)
 
                 val extension = filePath.substring(filePath.lastIndexOf('.'))
-                val stickerFile = File(stickerSetDirectory, "thumb$extension")
-                if (!stickerFile.exists()) withContext(Dispatchers.IO) {
-                    stickerFile.createNewFile()
+                if (extension != ".tgs") {
+                    val stickerFile = File(stickerSetDirectory, "thumb$extension")
+                    if (!stickerFile.exists()) withContext(Dispatchers.IO) {
+                        stickerFile.createNewFile()
+                    }
+                    stickerFile.writeBytes(data)
                 }
-                stickerFile.writeBytes(data)
             }
 
             // download stickers

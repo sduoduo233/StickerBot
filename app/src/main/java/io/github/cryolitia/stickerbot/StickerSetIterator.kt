@@ -37,9 +37,10 @@ fun iterateStickerSet(context: Context): ArrayList<Triple<Pair<File, File>, Stic
                 image = directory.listFiles { file ->
                     file.name.contains("thumb", true)
                 }?.get(0)
-            } catch (_: Exception) {
-                //ignore
+            } catch (e: Exception) {
+                Log.w("IterateStickerSet", "find thumb", e)
             }
+
             if (image == null) {
                 try {
                     image = directory.listFiles()?.get(0)
