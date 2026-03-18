@@ -243,7 +243,6 @@ class SettingFragment : PreferenceFragmentCompat() {
 
     override fun onResume() {
         super.onResume()
-        (requireActivity() as MainActivity).fab.visibility = View.GONE
     }
 
     class SettingDataStore(val dataStore: DataStore<Preferences>) : PreferenceDataStore() {

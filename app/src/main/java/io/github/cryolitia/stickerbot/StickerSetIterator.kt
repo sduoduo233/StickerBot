@@ -5,14 +5,17 @@ import android.util.Log
 import kotlinx.serialization.json.Json
 import java.io.File
 
+/**
+ * List all downloaded sticker sets
+ * @return list of ((directory, metadata file), StickerSet?, thumb image)
+ */
 fun iterateStickerSet(context: Context): ArrayList<Triple<Pair<File, File>, StickerSet?, File?>> {
     val stickersDirectory = File(context.getExternalFilesDir(null), "Stickers")
     if (!stickersDirectory.exists()) {
         stickersDirectory.mkdirs()
     }
 
-    val arrayList =
-        ArrayList<Triple<Pair<File, File>, StickerSet?, File?>>(stickersDirectory.safetyListFiles().size)
+    val arrayList = ArrayList<Triple<Pair<File, File>, StickerSet?, File?>>(stickersDirectory.safetyListFiles().size)
 
     for (directory in stickersDirectory.safetyListFiles()) {
         if (directory.isDirectory) {

@@ -27,6 +27,7 @@ import java.io.File
 lateinit var stickerMap: Map<String, ArrayList<File>>
 
 class SearchFragment : Fragment() {
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,

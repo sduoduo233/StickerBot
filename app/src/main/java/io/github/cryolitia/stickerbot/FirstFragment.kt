@@ -10,119 +10,193 @@ import android.view.MenuInflater
 import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
-import androidx.core.graphics.drawable.toDrawable
+import android.widget.ImageView
+import android.widget.TextView
 import androidx.core.view.MenuHost
 import androidx.core.view.MenuProvider
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.navigation.fragment.findNavController
-import androidx.preference.Preference
-import androidx.preference.Preference.OnPreferenceClickListener
-import androidx.preference.PreferenceFragmentCompat
+import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import androidx.work.Data
+import androidx.work.OneTimeWorkRequest
+import androidx.work.OutOfQuotaPolicy
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.google.android.flexbox.FlexDirection
 import com.google.android.flexbox.FlexboxLayoutManager
 import com.google.android.flexbox.JustifyContent
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
+import io.github.cryolitia.stickerbot.databinding.DialogDownloadBinding
+import io.github.cryolitia.stickerbot.databinding.FragmentMainBinding
 import kotlinx.coroutines.launch
+import java.io.File
 
-/**
- * A simple [Fragment] subclass as the default destination in the navigation.
- */
-class FirstFragment : PreferenceFragmentCompat() {
+private data class AdapterItem (
+    val title: String,
+    val name: String,
+    val image: Bitmap?,
+    val directory: File,
+    val metadataFile: File
+)
 
-    override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
-        preferenceScreen = preferenceManager.createPreferenceScreen(requireContext())
+private class StickerSetAdapter(
+    private val dataSet: Array<AdapterItem>,
+    private val onClick: (AdapterItem) -> Unit = {},
+) :
+    RecyclerView.Adapter<StickerSetAdapter.ViewHolder>() {
 
-        val stickerSetArray = iterateStickerSet(requireContext())
+    class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+        val imageView: ImageView = view.findViewById(R.id.image)
+        val displayName: TextView = view.findViewById(R.id.display_name)
+        val id: TextView = view.findViewById(R.id.sticker_id)
+    }
 
-        for (stickerSet in stickerSetArray) {
-            val directory = stickerSet.first.first
-            val metadataFile = stickerSet.first.second
-            val metadata = stickerSet.second
-            val image = stickerSet.third
+    override fun onCreateViewHolder(viewGroup: ViewGroup, viewType: Int): ViewHolder {
+        val view = LayoutInflater.from(viewGroup.context).inflate(R.layout.item_stickerset, viewGroup, false)
+        return ViewHolder(view)
+    }
 
-            var bitmap: Bitmap? = null
-            if (image != null) {
-                val stream = image.inputStream()
-                try {
-                    bitmap = BitmapFactory.decodeStream(stream)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                } finally {
-                    stream.close()
+    override fun onBindViewHolder(viewHolder: ViewHolder, position: Int) {
+        val item = dataSet[position]
+        viewHolder.imageView.setImageBitmap(item.image)
+        viewHolder.displayName.text = item.title
+        viewHolder.id.text = item.name
+        viewHolder.itemView.isClickable = true
+        viewHolder.itemView.setOnClickListener {
+            onClick(item)
+        }
+    }
+
+    override fun getItemCount() = dataSet.size
+}
+
+class FirstFragment : Fragment() {
+
+    /**
+     * Download / update sticker set
+     */
+    private fun onFabClicked() {
+
+        val ctx = this@FirstFragment.requireContext()
+
+        lifecycleScope.launch {
+            val token = ctx.getPreference(stringPreferencesKey(TELEGRAM_BOT_TOKEN))
+
+            if (token.isNullOrBlank()) {
+                with(ctx) { "Please set telegram bot token in settings firstly.".toast() }
+                return@launch
+            }
+
+            MaterialAlertDialogBuilder(ctx).run {
+
+                var textInputEditText: TextInputEditText
+                val textInputLayout: TextInputLayout = TextInputLayout(
+                    ctx,
+                    null,
+                    com.google.android.material.R.attr.textInputOutlinedStyle
+                ).apply {
+                    prefixText = "https://t.me/addstickers/"
+                    textInputEditText = TextInputEditText(this.context)
+                    addView(textInputEditText)
                 }
-            }
 
-            val preference = Preference(requireContext())
-            if (metadata != null) {
-                preference.title = metadata.title
-                preference.summary = metadata.name
-            } else {
-                preference.title = directory.name
-            }
-            preference.icon = bitmap?.toDrawable(resources)
-            preference.onPreferenceClickListener = OnPreferenceClickListener {
-                lifecycleScope.launch {
-                    val recyclerView = RecyclerView(requireContext())
-                    val flexLayoutManager = FlexboxLayoutManager(context)
-                    flexLayoutManager.flexDirection = FlexDirection.ROW
-                    flexLayoutManager.justifyContent = JustifyContent.SPACE_AROUND
-                    recyclerView.layoutManager = flexLayoutManager
+                setTitle("Input Stickers link")
+                setView(textInputLayout)
+                setPositiveButton(
+                    "OK"
+                ) { _, _ ->
 
-                    recyclerView.adapter = GalleryAdapter(
-                        requireContext(),
-                        getPreviewScale(requireContext()),
-                        directory.safetyListFiles(),
-                    ) { file ->
+                    val stickersUrl = textInputEditText.text.toString()
+                    if (stickersUrl.isBlank()) {
                         lifecycleScope.launch {
-                            shareSticker(file, requireContext())
+                            with(ctx) {
+                                "Please input stickers link".toast()
+                            }
                         }
+                        return@setPositiveButton
                     }
 
-                    MaterialAlertDialogBuilder(requireContext())
-                        .setTitle(preference.title)
-                        .setView(recyclerView)
-                        .setNegativeButton("Delete") { _, _ ->
-                            MaterialAlertDialogBuilder(requireContext())
-                                .setMessage("Delete?")
-                                .setNegativeButton("Confirm") { _, _ ->
-                                    directory.deleteRecursively()
-                                    if (metadataFile.exists()) {
-                                        metadataFile.delete()
-                                    }
-                                    requireActivity().recreate()
-                                }
-                                .setNeutralButton("Cancel") { dialog, _ ->
-                                    dialog.dismiss()
-                                }
-                                .create()
-                                .show()
-                        }
-                        .setNeutralButton("Update") { dialog, _ ->
-                            dialog.dismiss()
-                            // (activity as MainActivity).downloadStickers(requireContext(), directory.name)
-                        }
-                        .setPositiveButton("Close") { dialog, _ ->
-                            dialog.dismiss()
+                    val dialogBinding = DialogDownloadBinding.inflate(layoutInflater)
+                    val progressDialog = MaterialAlertDialogBuilder(ctx)
+                        .setTitle("Downloading Stickers")
+                        .setView(dialogBinding.root)
+                        .setCancelable(false)
+                        .setNegativeButton("Cancel") { _, _ ->
+                            WorkManager.getInstance(ctx)
+                                .cancelAllWorkByTag(stickersUrl)
                         }
                         .create()
-                        .show()
-                    val params = recyclerView.layoutParams
-                    if (params is ViewGroup.MarginLayoutParams) {
-                        val dp = TypedValue.applyDimension(
-                            TypedValue.COMPLEX_UNIT_DIP,
-                            16F,
-                            resources.displayMetrics
-                        ).toInt()
-                        params.setMargins(dp, dp, dp, 0)
-                        recyclerView.layoutParams = params
+                    progressDialog.show()
+
+                    val request = OneTimeWorkRequest.Builder(DownloadStickersWork::class.java)
+                        .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                        .addTag(stickersUrl)
+                        .setInputData(
+                            Data.Builder().putString("STICKERS_URL", stickersUrl).build()
+                        )
+                        .build()
+
+                    val workManager = WorkManager.getInstance(ctx)
+                    workManager.enqueue(request)
+
+                    lifecycleScope.launch {
+                        workManager.getWorkInfoByIdFlow(request.id).collect { workInfo ->
+                            if (workInfo != null) {
+                                val progress = workInfo.progress.getFloat("progress", 0f)
+                                val subProgress = workInfo.progress.getString("sub_progress")
+                                val latest = workInfo.progress.getString("latest")
+
+                                if (subProgress != null) {
+                                    dialogBinding.FrameLinearProgressIndicator.progress =
+                                        (progress * 100).toInt()
+                                    dialogBinding.FrameTextView.text =
+                                        "${(progress * 100).toInt()}%"
+                                    dialogBinding.FFmpegDetail.text =
+                                        "Processing: ${File(subProgress).name}"
+                                } else {
+                                    dialogBinding.linearProgressIndicator.progress =
+                                        (progress * 100).toInt()
+                                    dialogBinding.progressText.text =
+                                        "${(progress * 100).toInt()}%"
+                                }
+
+                                if (latest != null) {
+                                    dialogBinding.StickerDetail.text =
+                                        "Latest: ${File(latest).name}"
+                                    val bitmap = BitmapFactory.decodeFile(latest)
+                                    if (bitmap != null) {
+                                        dialogBinding.StickerImage.setImageBitmap(bitmap)
+                                    }
+                                }
+
+                                if (workInfo.state.isFinished) {
+                                    progressDialog.dismiss()
+                                    with(ctx) {
+                                        if (workInfo.state == WorkInfo.State.SUCCEEDED) {
+                                            "Download finished".toast()
+                                        } else if (workInfo.state == WorkInfo.State.FAILED) {
+                                            val error =
+                                                workInfo.outputData.getString("error")
+                                                    ?: "Unknown error"
+                                            error.alert()
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                true
+                setNegativeButton("Cancel") { dialog, _ -> dialog.dismiss() }
+                create()
+                show()
             }
-            preferenceScreen.addPreference(preference)
+
         }
     }
 
@@ -130,6 +204,114 @@ class FirstFragment : PreferenceFragmentCompat() {
         inflater: LayoutInflater, container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
+
+        val binding = FragmentMainBinding.inflate(inflater)
+
+        // recycler view
+
+        val stickerSetArray = iterateStickerSet(requireContext())
+        val adapterItems = ArrayList<AdapterItem>(stickerSetArray.size)
+        for (stickerSet in stickerSetArray) {
+            val metadata = stickerSet.second
+            val image = stickerSet.third
+            val directory = stickerSet.first.first
+            val metadataFile = stickerSet.first.second
+
+            var bitmap: Bitmap? = null
+            if (image != null) {
+                bitmap = BitmapFactory.decodeFile(image.absolutePath)
+            }
+
+            adapterItems.add(AdapterItem(
+                metadata!!.title,
+                metadata.name,
+                bitmap,
+                directory,
+                metadataFile
+            ))
+        }
+
+        binding.recyclerView.adapter = StickerSetAdapter(adapterItems.toTypedArray(), { item ->
+            // on item click
+
+            lifecycleScope.launch {
+
+                val recyclerView = RecyclerView(requireContext())
+                val flexLayoutManager = FlexboxLayoutManager(context)
+                flexLayoutManager.flexDirection = FlexDirection.ROW
+                flexLayoutManager.justifyContent = JustifyContent.SPACE_AROUND
+                recyclerView.layoutManager = flexLayoutManager
+
+                recyclerView.adapter = GalleryAdapter(
+                    requireContext(),
+                    getPreviewScale(requireContext()),
+                    item.directory.safetyListFiles(),
+                ) { file ->
+                    lifecycleScope.launch {
+                        shareSticker(file, requireContext())
+                    }
+                }
+
+                MaterialAlertDialogBuilder(requireContext())
+                    .setTitle(item.title)
+                    .setView(recyclerView)
+                    .setNegativeButton("Delete") { _, _ ->
+
+
+                        MaterialAlertDialogBuilder(requireContext())
+                            .setMessage("Delete?")
+                            .setNegativeButton("Confirm") { _, _ ->
+                                item.directory.deleteRecursively()
+                                if (item.metadataFile.exists()) {
+                                    item.metadataFile.delete()
+                                }
+                                requireActivity().recreate()
+                            }
+                            .setNeutralButton("Cancel") { dialog, _ ->
+                                dialog.dismiss()
+                            }
+                            .create()
+                            .show()
+
+                    }
+                    .setNeutralButton("Update") { dialog, _ ->
+
+                        dialog.dismiss()
+                        // (activity as MainActivity).downloadStickers(requireContext(), directory.name)
+
+                    }
+                    .setPositiveButton("Close") { dialog, _ ->
+
+                        dialog.dismiss()
+
+                    }
+                    .create()
+                    .show()
+
+                val params = recyclerView.layoutParams
+                if (params is ViewGroup.MarginLayoutParams) {
+                    val dp = TypedValue.applyDimension(
+                        TypedValue.COMPLEX_UNIT_DIP,
+                        16F,
+                        resources.displayMetrics
+                    ).toInt()
+                    params.setMargins(dp, dp, dp, 0)
+                    recyclerView.layoutParams = params
+                }
+
+            }
+
+        })
+
+        binding.recyclerView.layoutManager = LinearLayoutManager(requireContext())
+
+        // fab
+
+        binding.fab.setOnClickListener {
+            onFabClicked()
+        }
+
+        // menu
 
         (requireHost() as MenuHost).addMenuProvider(object : MenuProvider {
 
@@ -158,11 +340,7 @@ class FirstFragment : PreferenceFragmentCompat() {
 
         }, viewLifecycleOwner, Lifecycle.State.RESUMED)
 
-        return super.onCreateView(inflater, container, savedInstanceState)
+        return binding.root
     }
 
-    override fun onResume() {
-        super.onResume()
-        (requireActivity() as MainActivity).fab.visibility = View.VISIBLE
-    }
 }
