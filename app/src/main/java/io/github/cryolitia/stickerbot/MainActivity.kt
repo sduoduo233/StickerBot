@@ -21,6 +21,7 @@ import androidx.core.graphics.scale
 import androidx.core.view.WindowCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.IOException
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -31,6 +32,11 @@ import androidx.navigation.fragment.NavHostFragment
 import androidx.navigation.ui.AppBarConfiguration
 import androidx.navigation.ui.navigateUp
 import androidx.navigation.ui.setupActionBarWithNavController
+import androidx.work.Data
+import androidx.work.OneTimeWorkRequest
+import androidx.work.OutOfQuotaPolicy
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.google.android.material.color.DynamicColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.floatingactionbutton.FloatingActionButton
@@ -51,6 +57,7 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
 import io.ktor.client.request.headers
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsBytes
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
@@ -98,485 +105,125 @@ class MainActivity : AppCompatActivity() {
         appBarConfiguration = AppBarConfiguration(navController.graph)
         setupActionBarWithNavController(navController, appBarConfiguration)
 
-        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            lifecycleScope.launch {
-                MaterialAlertDialogBuilder(this@MainActivity)
-                    .setTitle("Uncaught exception on thread $thread")
-                    .setMessage(throwable.toString())
-                    .setNeutralButton("Close") { dialog, _ ->
-                        dialog.dismiss()
-                        exitProcess(-1)
-                    }
-                    .create()
-                    .show()
-            }
-        }
-
         fab = binding.fab
         binding.fab.setOnClickListener {
             lifecycleScope.launch {
                 val token = getPreference(stringPreferencesKey(TELEGRAM_BOT_TOKEN))
                 if (token.isNullOrBlank()) {
-                    "Please set telegram bot token in settings firstly.".toast()
-                } else {
-                    MaterialAlertDialogBuilder(this@MainActivity).run {
-                        var textInputEditText: TextInputEditText
-                        val textInputLayout: TextInputLayout = TextInputLayout(
-                            this@MainActivity,
-                            null,
-                            com.google.android.material.R.attr.textInputOutlinedStyle
-                        ).apply {
-
-                            var clipText: String? = null
-                            val clipboard: ClipboardManager = context.getSystemService(
-                                CLIPBOARD_SERVICE
-                            ) as ClipboardManager
-                            val clipData = clipboard.primaryClip
-                            if (clipData != null && clipData.itemCount > 0) {
-                                clipText = clipData.getItemAt(0).coerceToText(context).toString()
+                    with(this@MainActivity) {
+                        "Please set telegram bot token in settings firstly.".toast()
+                    }
+                    return@launch
+                }
+                MaterialAlertDialogBuilder(this@MainActivity).run {
+                    var textInputEditText: TextInputEditText
+                    val textInputLayout: TextInputLayout = TextInputLayout(
+                        this@MainActivity,
+                        null,
+                        com.google.android.material.R.attr.textInputOutlinedStyle
+                    ).apply {
+                        prefixText = "https://t.me/addstickers/"
+                        textInputEditText = TextInputEditText(this.context)
+                        addView(textInputEditText)
+                    }
+                    setTitle("Input Stickers link")
+                    setView(textInputLayout)
+                    setPositiveButton(
+                        "OK"
+                    ) { _, _ ->
+                        val stickersUrl = textInputEditText.text.toString()
+                        if (stickersUrl.isBlank()) {
+                            lifecycleScope.launch {
+                                with(this@MainActivity) {
+                                    "Please input stickers link".toast()
+                                }
                             }
+                            return@setPositiveButton
+                        }
 
-                            prefixText = "https://t.me/addstickers/"
-                            textInputEditText = TextInputEditText(this.context).apply {
-                                doAfterTextChanged {
-                                    if (text?.contains("https://t.me/addstickers/") == true || text?.contains("https://t.me/addemoji/") == true) {
-                                        setText(
-                                            text?.replace(
-                                                "https://t.me/(addstickers|addemoji)/".toRegex(),
-                                                ""
-                                            )
-                                        )
+                        val dialogBinding = DialogDownloadBinding.inflate(layoutInflater)
+                        val progressDialog = MaterialAlertDialogBuilder(this@MainActivity)
+                            .setTitle("Downloading Stickers")
+                            .setView(dialogBinding.root)
+                            .setCancelable(false)
+                            .setNegativeButton("Cancel") { _, _ ->
+                                WorkManager.getInstance(this@MainActivity)
+                                    .cancelAllWorkByTag(stickersUrl)
+                            }
+                            .create()
+                        progressDialog.show()
+
+                        val request = OneTimeWorkRequest.Builder(DownloadStickersWork::class.java)
+                            .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                            .addTag(stickersUrl)
+                            .setInputData(
+                                Data.Builder().putString("STICKERS_URL", stickersUrl).build()
+                            )
+                            .build()
+
+                        val workManager = WorkManager.getInstance(this@MainActivity)
+                        workManager.enqueue(request)
+
+                        lifecycleScope.launch {
+                            workManager.getWorkInfoByIdFlow(request.id).collect { workInfo ->
+                                if (workInfo != null) {
+                                    val progress = workInfo.progress.getFloat("progress", 0f)
+                                    val subProgress = workInfo.progress.getString("sub_progress")
+                                    val latest = workInfo.progress.getString("latest")
+
+                                    if (subProgress != null) {
+                                        dialogBinding.FrameLinearProgressIndicator.progress =
+                                            (progress * 100).toInt()
+                                        dialogBinding.FrameTextView.text =
+                                            "${(progress * 100).toInt()}%"
+                                        dialogBinding.FFmpegDetail.text =
+                                            "Processing: ${File(subProgress).name}"
+                                    } else {
+                                        dialogBinding.linearProgressIndicator.progress =
+                                            (progress * 100).toInt()
+                                        dialogBinding.progressText.text =
+                                            "${(progress * 100).toInt()}%"
+                                    }
+
+                                    if (latest != null) {
+                                        dialogBinding.StickerDetail.text =
+                                            "Latest: ${File(latest).name}"
+                                        val bitmap = BitmapFactory.decodeFile(latest)
+                                        if (bitmap != null) {
+                                            dialogBinding.StickerImage.setImageBitmap(bitmap)
+                                        }
+                                    }
+
+                                    if (workInfo.state.isFinished) {
+                                        progressDialog.dismiss()
+                                        with(this@MainActivity) {
+                                            if (workInfo.state == WorkInfo.State.SUCCEEDED) {
+                                                "Download finished".toast()
+                                            } else if (workInfo.state == WorkInfo.State.FAILED) {
+                                                val error =
+                                                    workInfo.outputData.getString("error")
+                                                        ?: "Unknown error"
+                                                error.alert()
+                                            }
+                                        }
                                     }
                                 }
-                                if (clipText != null && (clipText.contains("https://t.me/addstickers/") || clipText.contains("https://t.me/addemoji/") )) {
-                                    setText(clipText)
-                                }
                             }
-                            addView(textInputEditText)
-                        }
-                        setTitle("Input Stickers link")
-                        setView(textInputLayout)
-                        setPositiveButton(
-                            "OK"
-                        ) { _, _ ->
-                            downloadStickers(context, textInputEditText.text.toString())
-                        }
-                        setNegativeButton("Cancel") { dialog, _ -> dialog.dismiss() }
-                        create()
-                        show()
-                        val params = textInputLayout.layoutParams
-                        if (params is ViewGroup.MarginLayoutParams) {
-                            val dp = TypedValue.applyDimension(
-                                TypedValue.COMPLEX_UNIT_DIP,
-                                16F,
-                                resources.displayMetrics
-                            ).toInt()
-                            params.setMargins(dp, dp, dp, 0)
-                            textInputLayout.layoutParams = params
                         }
                     }
+                    setNegativeButton("Cancel") { dialog, _ -> dialog.dismiss() }
+                    create()
+                    show()
                 }
+
             }
         }
     }
 
     override fun onResume() {
         super.onResume()
-        val appLinkIntent: Intent = intent
-        val appLinkData: String? = appLinkIntent.data?.toString()
-        if (appLinkData != null) {
-            downloadStickers(this, appLinkData.substring(appLinkData.lastIndexOf('/') + 1))
-        }
-        intent.data = null
     }
 
-    @SuppressLint("SetTextI18n")
-    val downloadStickers: (context: Context, stickersUrl: String) -> Unit =
-        { context, stickersUrl ->
-            lifecycleScope.launch onClickPositiveButton@{
-                val token = getPreference(stringPreferencesKey(TELEGRAM_BOT_TOKEN))
-                if (token.isNullOrBlank()) {
-                    "Please set telegram bot token in settings firstly.".toast()
-                    return@onClickPositiveButton
-                }
-                if (stickersUrl.isBlank()) {
-                    "Stickers URL is blank!".toast()
-                }
-                val useProxy = getPreference(booleanPreferencesKey(USE_HTTP_PROXY), false)
-                var httpProxy = ""
-                if (useProxy) {
-                    httpProxy = getPreference(stringPreferencesKey(HTTP_PROXY), "")
-                    if (httpProxy.isBlank()) {
-                        "Proxy is enabled but not set, please check in settings!".toast()
-                        return@onClickPositiveButton
-                    }
-                }
-                val prepareDialog = loadingDialog()
-                val client = HttpClient(OkHttp) {
-                    install(ContentNegotiation) {
-                        json(Json {
-                            ignoreUnknownKeys = true
-                        })
-                    }
-                    if (useProxy) {
-                        engine {
-                            proxy = ProxyBuilder.http(httpProxy)
-                        }
-                    }
-                }
-
-                val response: HttpResponse
-
-                try {
-                    response = withContext(Dispatchers.IO) {
-                        client.get("https://api.telegram.org/bot$token/getStickerSet") {
-                            url {
-                                parameters.append("name", stickersUrl)
-                            }
-                            method = HttpMethod.Get
-                            headers {
-                                append(HttpHeaders.Accept, ContentType.Application.Json)
-                            }
-                        }
-                    }
-                    if (!response.status.isSuccess()) {
-                        Pair(response.status.toString(), response.body<String>()).alert()
-                        return@onClickPositiveButton
-                    }
-                } catch (e: Throwable) {
-                    e.alert()
-                    e.printStackTrace()
-                    return@onClickPositiveButton
-                } finally {
-                    prepareDialog.dismiss()
-                }
-
-                val stickerSetResult: TelegramResult<StickerSet> = response.body()
-                if (!stickerSetResult.ok || stickerSetResult.result == null) {
-                    stickerSetResult.toString().alert()
-                    return@onClickPositiveButton
-                }
-                val dialogBinding = DialogDownloadBinding.inflate(layoutInflater, null, false)
-                val dialog = MaterialAlertDialogBuilder(context)
-                    .setTitle(stickerSetResult.result.title)
-                    .setView(dialogBinding.root)
-                    .setCancelable(false)
-                    .create()
-                dialog.show()
-
-                val wakeLock: PowerManager.WakeLock =
-                    (getSystemService(POWER_SERVICE) as PowerManager).run {
-                        newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "StickerBot::Download")
-                    }
-                wakeLock.acquire(5 * 60 * 1000)
-                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-                withContext(Dispatchers.IO) {
-                    withContext(Dispatchers.Main) {
-                        dialogBinding.StickerSetDetail.text = stickerSetResult.result.toString()
-                    }
-                    val stickersDirectory = File(context.getExternalFilesDir(null), "Stickers")
-                    val stickerSetDirectory = File(stickersDirectory, stickerSetResult.result.name)
-                    if (!stickerSetDirectory.exists()) {
-                        stickerSetDirectory.mkdirs()
-                    }
-                    if (stickerSetResult.result.thumb != null) {
-                        client.getFile(
-                            token,
-                            stickerSetResult.result.thumb.file_id,
-                            { data, _, filePath ->
-                                val extension = filePath.substring(filePath.lastIndexOf('.'))
-                                val stickerFile = File(stickerSetDirectory, "thumb$extension")
-                                if (!stickerFile.exists()) {
-                                    withContext(Dispatchers.IO) {
-                                        stickerFile.createNewFile()
-                                    }
-                                }
-                                stickerFile.writeBytes(data)
-                                try {
-                                    val bitmap = BitmapFactory.decodeByteArray(data, 0, data.size)
-                                    withContext(Dispatchers.Main) {
-                                        dialogBinding.StickerSetImage.setImageBitmap(bitmap)
-                                        dialogBinding.StickerSetImage.visibility = View.VISIBLE
-                                    }
-                                } catch (e: Exception) {
-                                    e.alert()
-                                    e.printStackTrace()
-                                }
-                            },
-                            {
-                                it.alert()
-                            })
-                    }
-                    val size = stickerSetResult.result.stickers.size
-                    var i = 0
-                    withContext(Dispatchers.Main) {
-                        dialogBinding.linearProgressIndicator.max = size
-                        dialogBinding.linearProgressIndicator.progress = 0
-                    }
-                    val stickerPackBuilder = Indexables.stickerPackBuilder()
-                        .setName(stickerSetResult.result.title)
-                        .setUrl("cryolitia://stickerset/${stickerSetResult.result.name}")
-                    val stickerList = mutableListOf<StickerBuilder>()
-
-                    val channel: Channel<Pair<Sticker, Triple<ByteArray, String, String>>> =
-                        Channel(1)
-                    launch {
-                        for (sticker in stickerSetResult.result.stickers) {
-                            client.getFile(token, sticker.file_id, { data, fileUniqueId, filePath ->
-                                channel.send(Pair(sticker, Triple(data, fileUniqueId, filePath)))
-                            }, {
-                                it.alert()
-                            })
-                        }
-                        channel.close()
-                    }
-                    for (y in channel) {
-                        var sticker = y.first
-                        var data = y.second.first
-                        var fileUniqueId = y.second.second
-                        var filePath = y.second.third
-                        withContext(Dispatchers.Main) {
-                            dialogBinding.StickerDetail.text = sticker.toString()
-                            dialogBinding.emoji.text = sticker.emoji ?: ""
-                        }
-
-                        withContext(Dispatchers.Main) {
-                            i++
-                            dialogBinding.linearProgressIndicator.setProgressCompat(i, true)
-                            dialogBinding.progressText.text = "$i / $size"
-                        }
-
-                        lateinit var stickerFile: File
-
-                        if (sticker.is_animated || sticker.is_video) {
-                            withContext(Dispatchers.Main) {
-                                dialogBinding.FrameLayout.visibility = View.VISIBLE
-                                dialogBinding.FFmpegDetail.visibility = View.VISIBLE
-                                dialogBinding.FrameImageView.visibility = View.VISIBLE
-                                if (sticker.is_video) {
-                                    dialogBinding.StickerImage.visibility = View.GONE
-                                    dialogBinding.LottieView.visibility = View.GONE
-                                    dialogBinding.FrameTextView.visibility = View.GONE
-                                } else {
-                                    dialogBinding.StickerImage.visibility = View.INVISIBLE
-                                    dialogBinding.LottieView.visibility = View.VISIBLE
-                                    dialogBinding.FrameTextView.visibility = View.VISIBLE
-                                }
-                            }
-                            withContext(Dispatchers.IO) {
-                                var encoder: FFmpegEncoder? = null
-                                try {
-                                    if (sticker.is_animated) {
-                                        val input = ByteArrayInputStream(data)
-                                        val gzip = GZIPInputStream(input)
-                                        data = IOUtils.toByteArray(gzip)
-                                        input.close()
-                                        gzip.close()
-                                        val jsonString = String(
-                                            data,
-                                            StandardCharsets.UTF_8
-                                        )
-                                        withContext(Dispatchers.Main) {
-                                            dialogBinding.LottieView.setAnimationFromJson(
-                                                jsonString,
-                                                sticker.file_unique_id
-                                            )
-                                            dialogBinding.LottieView.playAnimation()
-                                        }
-                                    }
-
-                                    stickerFile = File(stickerSetDirectory, "$fileUniqueId.gif")
-                                    encoder = FFmpegEncoder(
-                                        stickerFile,
-                                        this,
-                                        this@MainActivity,
-                                        { log -> log.print() },
-                                        { statistics ->
-                                            lifecycleScope.launch {
-                                                dialogBinding.FFmpegDetail.text = statistics.toFormatedString()
-                                            }
-                                        })
-                                    encoder.start()
-
-                                    val maxSize = getPreference(
-                                        stringPreferencesKey(LIMIT_SIZE),
-                                        "512"
-                                    ).toFloatOrNull() ?: 512.0F
-
-                                    if (sticker.is_animated) {
-                                        var decoder = LottieStickerDecoder(
-                                            data,
-                                            context,
-                                            sticker.file_unique_id
-                                        )
-                                        decoder.start()
-                                        val width = decoder.getWidth()
-                                        val height = decoder.getHeight()
-                                        val durationInFrames = decoder.getDuration()
-                                        val scaleFactor = minOf(
-                                            min(maxSize, sticker.width.toFloat()) / width,
-                                            min(maxSize, sticker.height.toFloat()) / height,
-                                            1.0F
-                                        )
-
-                                        try {
-                                            withContext(Dispatchers.Main) {
-                                                dialogBinding.FrameLinearProgressIndicator.max =
-                                                    durationInFrames
-                                                dialogBinding.FrameLinearProgressIndicator.progress =
-                                                    0
-                                            }
-
-                                            decoder.getFrames { bitmap, index, rate ->
-                                                try {
-                                                    encoder.rate = rate
-                                                    encoder.addFrame(
-                                                        bitmap.scale(
-                                                            (width * scaleFactor).toInt(),
-                                                            (height * scaleFactor).toInt()
-                                                        )
-                                                    )
-                                                } catch (e: Exception) {
-                                                    e.toString().toast()
-                                                    e.printStackTrace()
-                                                }
-
-                                                withContext(Dispatchers.Main) {
-                                                    dialogBinding.FrameImageView.setImageBitmap(bitmap)
-                                                    dialogBinding.FrameTextView.text =
-                                                        "$index / $durationInFrames"
-                                                    dialogBinding.FrameLinearProgressIndicator.setProgressCompat(
-                                                        index,
-                                                        true
-                                                    )
-                                                    dialogBinding.FrameLinearProgressIndicator.isIndeterminate = false
-                                                }
-                                            }
-                                            encoder.process()
-                                        } catch (e: Exception) {
-                                            with(context) {
-                                                e.alert()
-                                                e.printStackTrace()
-                                            }
-                                        } finally {
-                                            decoder.end()
-                                            encoder.end()
-                                        }
-                                    } else {
-                                        withContext(Dispatchers.Main) {
-                                            dialogBinding.FrameLinearProgressIndicator.isIndeterminate = true
-                                        }
-                                        encoder.process(data, maxSize.toInt()) {file ->
-                                            withContext(Dispatchers.Main) {
-                                                val bitmap = BitmapFactory.decodeFile(file.absolutePath)
-                                                dialogBinding.FrameImageView.setImageBitmap(bitmap)
-                                            }
-                                        }
-                                    }
-                                } catch (e: Exception) {
-                                    e.alert()
-                                    e.printStackTrace()
-                                } finally {
-                                    encoder?.end()
-                                }
-                            }
-                        } else {
-                            withContext(Dispatchers.Main) {
-                                try {
-                                    dialogBinding.FrameLayout.visibility = View.GONE
-                                    dialogBinding.LottieView.visibility = View.GONE
-                                    dialogBinding.FFmpegDetail.visibility = View.GONE
-                                    dialogBinding.FrameImageView.visibility = View.GONE
-                                    val bitmap =
-                                        BitmapFactory.decodeByteArray(data, 0, data.size)
-                                    dialogBinding.StickerImage.setImageBitmap(bitmap)
-                                    dialogBinding.StickerImage.visibility = View.VISIBLE
-                                } catch (e: Exception) {
-                                    e.alert()
-                                    e.printStackTrace()
-                                }
-                            }
-
-                            val extension = filePath.substring(filePath.lastIndexOf('.'))
-                            stickerFile = File(stickerSetDirectory, fileUniqueId + extension)
-                            if (stickerFile.exists()) {
-                                stickerFile.delete()
-                            }
-                            withContext(Dispatchers.IO) {
-                                stickerFile.createNewFile()
-                            }
-                            stickerFile.writeBytes(data)
-                        }
-
-                        if (!sticker.is_video) {
-                            val uri = FileProvider.getUriForFile(
-                                context,
-                                "io.github.cryolitia.stickerbot.stickerprovider",
-                                stickerFile
-                            )
-                            grantUriPermission(
-                                "com.google.android.inputmethod.latin",
-                                uri,
-                                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
-                            )
-                            val stickerBuilder = Indexables.stickerBuilder().apply {
-                                setName(sticker.file_unique_id)
-                                setUrl("cryolitia://stickerset/${stickerSetResult.result.name}/${sticker.file_unique_id}")
-                                setImage(uri.toString())
-                                if (!sticker.emoji.isNullOrBlank()) {
-                                    setDescription(sticker.emoji)
-                                    setKeywords(sticker.emoji)
-                                    setIsPartOf(
-                                        Indexables.stickerPackBuilder()
-                                            .setName(stickerSetResult.result.title)
-                                    )
-                                }
-                            }
-                            stickerList.add(stickerBuilder)
-                        }
-                    }
-                    if (stickerList.isNotEmpty()) {
-                        stickerPackBuilder.setHasSticker(*stickerList.toTypedArray())
-                        FirebaseAppIndex.getInstance(context).update(
-                            stickerPackBuilder.build(),
-                            *stickerList.map {
-                                it.build()
-                            }.toTypedArray()
-                        )
-                    }
-
-                    val stickerSetMetadata = Json.encodeToString(stickerSetResult.result)
-                    val metadataDirectory = File(context.getExternalFilesDir(null), "Metadata")
-                    if (!metadataDirectory.exists()) {
-                        metadataDirectory.mkdirs()
-                    }
-                    val metadataFile =
-                        File(metadataDirectory, "${stickerSetResult.result.name}.json")
-                    if (!metadataFile.exists()) {
-                        metadataFile.createNewFile()
-                    }
-                    metadataFile.writeText(stickerSetMetadata)
-
-                    withContext(Dispatchers.Main) {
-                        MaterialAlertDialogBuilder(context)
-                            .setTitle(stickerSetResult.result.title)
-                            .setMessage("Success")
-                            .setPositiveButton("OK") { dialog, _ ->
-                                dialog.dismiss()
-                            }
-                            .setOnDismissListener {
-                                dialog.dismiss()
-                                recreate()
-                            }
-                            .create()
-                            .show()
-                        wakeLock.release()
-                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    }
-                }
-            }
-        }
 
     override fun onSupportNavigateUp(): Boolean {
         val navController = findNavController(R.id.nav_host_fragment_content_main)
@@ -585,49 +232,71 @@ class MainActivity : AppCompatActivity() {
     }
 }
 
-suspend fun HttpClient.getFile(
-    token: String,
-    fileId: String,
-    onSuccess: suspend (data: ByteArray, fileUniqueId: String, filePath: String) -> Unit,
-    onFailure: suspend (reason: String) -> Unit
+data class TelegramFileDownloadResult(
+    val data: ByteArray,
+    val fileUniqueId: String,
+    val filePath: String
 ) {
-    try {
-        val response2 = get("https://api.telegram.org/bot$token/getFile") {
-            url {
-                parameters.append("file_id", fileId)
-            }
-            method = HttpMethod.Get
-            headers {
-                append(HttpHeaders.Accept, ContentType.Application.Json)
-            }
-        }
-        if (response2.status.isSuccess()) {
-            val file: TelegramResult<TelegramFile> = response2.body()
-            if (file.ok && file.result != null && file.result.file_path != null) {
-                val response3 =
-                    get("https://api.telegram.org/file/bot$token/${file.result.file_path}")
-                if (response3.status.isSuccess()) {
-                    val byteArray: ByteArray = response3.body()
-                    onSuccess(byteArray, file.result.file_unique_id, file.result.file_path)
-                }
-            } else {
-                onFailure(file.toString())
-            }
-        } else {
-            onFailure(response2.status.toString())
-        }
-    } catch (e: Throwable) {
-        onFailure(e.toString())
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+
+        other as TelegramFileDownloadResult
+
+        if (!data.contentEquals(other.data)) return false
+        if (fileUniqueId != other.fileUniqueId) return false
+        if (filePath != other.filePath) return false
+
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = data.contentHashCode()
+        result = 31 * result + fileUniqueId.hashCode()
+        result = 31 * result + filePath.hashCode()
+        return result
     }
 }
 
-context(context: Context) suspend fun String.toast() {
+
+suspend fun HttpClient.getTelegramFile(token: String, fileId: String): TelegramFileDownloadResult {
+    val response2 = get("https://api.telegram.org/bot$token/getFile") {
+        url { parameters.append("file_id", fileId) }
+        method = HttpMethod.Get
+        headers { append(HttpHeaders.Accept, ContentType.Application.Json) }
+    }
+    if (!response2.status.isSuccess()) {
+        throw IOException("Failed to get file: ${response2.status}")
+    }
+
+    val file: TelegramResult<TelegramFile> = response2.body()
+    if (!file.ok || file.result == null) {
+        throw IOException("Failed to get file: ${file.description}")
+    }
+
+    val response3 = get("https://api.telegram.org/file/bot$token/${file.result.file_path}")
+    if (!response3.status.isSuccess()) {
+        throw IOException("Failed to get file: ${response3.status}")
+    }
+
+    val bytes = response3.bodyAsBytes()
+
+    return TelegramFileDownloadResult(
+        bytes,
+        file.result.file_unique_id,
+        file.result.file_path ?: ""
+    )
+}
+
+context(context: Context)
+suspend fun String.toast() {
     withContext(Dispatchers.Main) {
         Toast.makeText(context, this@toast, Toast.LENGTH_LONG).show()
     }
 }
 
-context(context: Context) suspend fun String.alert() {
+context(context: Context)
+suspend fun String.alert() {
     withContext(Dispatchers.Main) {
         MaterialAlertDialogBuilder(context)
             .setMessage(this@alert)
@@ -639,7 +308,8 @@ context(context: Context) suspend fun String.alert() {
     }
 }
 
-context(context: Context) suspend fun Throwable.alert() {
+context(context: Context)
+suspend fun Throwable.alert() {
     withContext(Dispatchers.Main) {
         val textView = TextView(context)
         textView.text = this@alert.stackTraceToString()
@@ -650,7 +320,7 @@ context(context: Context) suspend fun Throwable.alert() {
             32F,
             context.resources.displayMetrics
         ).toInt()
-        textView.setPadding(px,px,px,0)
+        textView.setPadding(px, px, px, 0)
         MaterialAlertDialogBuilder(context)
             .setTitle(this@alert.toString())
             .setView(textView)
@@ -662,7 +332,8 @@ context(context: Context) suspend fun Throwable.alert() {
     }
 }
 
-context(context: Context) suspend fun Pair<String, String>.alert() {
+context(context: Context)
+suspend fun Pair<String, String>.alert() {
     withContext(Dispatchers.Main) {
         MaterialAlertDialogBuilder(context)
             .setTitle(this@alert.first)
@@ -676,7 +347,8 @@ context(context: Context) suspend fun Pair<String, String>.alert() {
 }
 
 
-context(context: Context) suspend fun loadingDialog(): AlertDialog {
+context(context: Context)
+suspend fun loadingDialog(): AlertDialog {
     return withContext(Dispatchers.Main) {
         val linearProgressIndicator = LinearProgressIndicator(context).apply {
             isIndeterminate = true
@@ -701,4 +373,4 @@ context(context: Context) suspend fun loadingDialog(): AlertDialog {
     }
 }
 
-fun File.safetyListFiles(): Array<File> = listFiles()?:arrayOf()
+fun File.safetyListFiles(): Array<File> = listFiles() ?: arrayOf()
